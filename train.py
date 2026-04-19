@@ -27,6 +27,8 @@ class CausalSelfAttention(nn.Module):
         #regolarizzazione
         self.n_head = config.n_head
         self.n_embd = config.n_embd
+        #aggiungo il modulo per i RoPE
+        self.rope = RoPE(config)
     
     def forward(self, x):
         B, T, C = x.size()
@@ -36,9 +38,12 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # BxTx(n_head)xdimensione testa -> Bx(n_head)xTxdimensione testa
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # BxTx(n_head)xdimensione testa -> Bx(n_head)xTxdimensione testa
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # BxTx(n_head)xdimensione testa -> Bx(n_head)xTxdimensione testa
+        #RoPE sulle matrici Q e K per aggiungere le informazioni di posizione
+        q = self.rope(q)
+        k = self.rope(k)
         #flash attention
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        #riporto la matrice alla dimensione originale
+        #riporto la matrice alla dimensione originale BxTxn_embd
         y = y.transpose(1, 2).contiguous().view(B,T,C)
         #la passo alla matrice dell'output dell'attenzione
         y = self.c_proj(y)
@@ -89,6 +94,42 @@ class RMSNorm(nn.Module):
     def forward(self, x):
         out = self._norm(x.float()).type_as(x) #passo x a float per evitare problemi di precisione con i bfloat16, poi riporto al tipo originale
         return out * self.gain
+    
+class RoPE(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.base = config.rope_base
+        self.h_dim = config.n_embd // config.n_head
+        self.block_size = config.block_size
+        self._rope_init(config)
+    
+    def _rope_init(self, config):
+        #calcolo le frequenze per le posizioni
+        inv_freq = 1. / (self.base ** (torch.arange(0, self.h_dim, 2).float() / self.h_dim))
+        pos_idx = torch.arange(self.block_size, dtype=torch.float)
+        freq = torch.einsum('m,t->mt', pos_idx, inv_freq)
+        #concateno le frequenze in coppie per creare le matrici di rotazione
+        cache = torch.stack([torch.cos(freq), torch.sin(freq)], dim=-1)
+        self.register_buffer('cache', cache, persistent=False) #registro la cache di dimensione [block_size, dimensione testa // 2, 2] come buffer non persistente perché è ricavabile dalle frequenze e non voglio salvarla nei checkpoint
+    
+    def forward(self, x):
+        #applico la rotazione alle matrici Q e K
+        #x ha dimensione [B, n_head, T, dimensione testa]
+        seq_len = x.size(2)
+        #prendo la cache per le posizioni fino a seq_len
+        rope_cache = self.cache[:seq_len] # [seq_len (T o block_size), dimensione testa // 2, 2]
+        # aggiungo una dimensione per per l'output
+        xshaped = x.reshape(*x.shape[:-1], -1, 2) # [B, n_head, T, dimensione testa // 2, 2]
+        #applico le rotazioni usando la formula di RoPE: x' = x * cos(pos) + rotate(x) * sin(pos), in cui rotate(x) è la matrice x ruotata di 90 gradi, quindi scambiando le coppie di dimensioni e cambiando di segno una delle due
+        x_out = torch.stack(
+        [
+            xshaped[..., 0] * rope_cache[..., 0] - xshaped[..., 1] * rope_cache[..., 1], #x * cos(pos) - rotate(x) * sin(pos)
+            xshaped[..., 0] * rope_cache[..., 1] + xshaped[..., 1] * rope_cache[..., 0]  #x * sin(pos) + rotate(x) * cos(pos)
+        ], dim=-1)
+        x_out = x_out.flatten(-2) # [B, n_head, T, dimensione testa]
+        return x_out.type_as(x) #riporto al x a bfloat16
+        
+        
 
 @dataclass
 class MyModelConfig:
@@ -98,6 +139,7 @@ class MyModelConfig:
     n_layers: int = 12 #numero di blocchi
     n_head: int = 12 #numero di teste di attenzione
     rms_norm_eps: float = 1e-5 
+    rope_base: int = 10000
     # dropout:float = 0.0 #dropout rate
 
 class MyModel(nn.Module):
@@ -107,7 +149,6 @@ class MyModel(nn.Module):
         
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
             h = nn.ModuleList([Block(config) for _ in range (config.n_layers)]),
             ln_f = RMSNorm(config)
             
@@ -136,12 +177,9 @@ class MyModel(nn.Module):
         #size di idx: B (batch size) x T (block size)
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward the sequence of {T} size because the block size in the model is only {self.config.block_size}"
-        #creo la matrice di posizioni TxT
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
-        #prendo i token e position embeddings
+        #prendo i token embeddings
         tok_emb = self.transformer.wte(idx)
-        pos_emb = self.transformer.wpe(pos)
-        x = tok_emb + pos_emb
+        x = tok_emb
         #forward pass sei blocchi del modello
         for block in self.transformer.h:
             x = block(x)
