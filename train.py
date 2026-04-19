@@ -1,5 +1,7 @@
 '''basato su nanogpt di Karpathy ma con le seguenti modifiche:
-
+    - uso di RMSnorm al posto di LayerNorm per diminuire la memoria e aumentare la velocità di addestramento (https://arxiv.org/abs/1910.07467)
+    - uso di SwiGLU al posto della GELU per aumentare la capacità del modello senza aumentare la dimensione degli embeding (https://arxiv.org/abs/2002.05202)
+    
 '''
 
 import os
@@ -64,9 +66,9 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.ln_1 = nn.RMSNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.ln_2 = nn.RMSNorm(config.n_embd)
         self.mlp = MLP(config)
     
     def forward(self, x):
@@ -77,7 +79,7 @@ class Block(nn.Module):
 @dataclass
 class MyModelConfig:
     block_size: int = 1024
-    vocab_size: int = 100277 #100000 BPE merges, 256 bytes tokens, 21 per i token specializ
+    vocab_size: int = 100277 #100000 BPE merges, 256 bytes tokens, 21 per i token specializzati
     n_embd: int = 768 #dimensione embedding 
     n_layers: int = 12 #numero di blocchi
     n_head: int = 12 #numero di teste di attenzione
@@ -92,7 +94,8 @@ class MyModel(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             h = nn.ModuleList([Block(config) for _ in range (config.n_layers)]),
-            ln_f = nn.LayerNorm(config.n_embd)
+            ln_f = nn.RMSNorm(config.n_embd)
+            
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
