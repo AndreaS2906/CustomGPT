@@ -1,5 +1,5 @@
 '''basato su nanogpt di Karpathy ma con le seguenti modifiche:
-    - uso di RMSnorm al posto di LayerNorm per diminuire la memoria e aumentare la velocità di addestramento (https://arxiv.org/abs/1910.07467)
+    - uso di RMSNorm al posto di LayerNorm per diminuire la memoria e aumentare la velocità di addestramento (https://arxiv.org/abs/1910.07467)
     - uso di SwiGLU al posto della GELU per aumentare la capacità del modello senza aumentare la dimensione degli embeding (https://arxiv.org/abs/2002.05202)
     
 '''
@@ -66,15 +66,29 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = nn.RMSNorm(config.n_embd)
+        self.ln_1 = RMSNorm(config)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.RMSNorm(config.n_embd)
+        self.ln_2 = RMSNorm(config)
         self.mlp = MLP(config)
     
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
+
+class RMSNorm(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.eps = config.rms_norm_eps
+        self.gain = nn.Parameter(torch.ones(config.n_embd))
+    
+    def _norm(self, x):
+        #calcolo la RMSNorm 
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+    
+    def forward(self, x):
+        out = self._norm(x.float()).type_as(x) #passo x a float per evitare problemi di precisione con i bfloat16, poi riporto al tipo originale
+        return out * self.gain
 
 @dataclass
 class MyModelConfig:
@@ -83,6 +97,7 @@ class MyModelConfig:
     n_embd: int = 768 #dimensione embedding 
     n_layers: int = 12 #numero di blocchi
     n_head: int = 12 #numero di teste di attenzione
+    rms_norm_eps: float = 1e-5 
     # dropout:float = 0.0 #dropout rate
 
 class MyModel(nn.Module):
@@ -94,7 +109,7 @@ class MyModel(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             h = nn.ModuleList([Block(config) for _ in range (config.n_layers)]),
-            ln_f = nn.RMSNorm(config.n_embd)
+            ln_f = RMSNorm(config)
             
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
