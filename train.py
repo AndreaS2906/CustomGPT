@@ -1,7 +1,7 @@
 '''basato su nanogpt di Karpathy ma con le seguenti modifiche:
     - uso di RMSNorm al posto di LayerNorm per diminuire la memoria e aumentare la velocità di addestramento (https://arxiv.org/abs/1910.07467)
     - uso di SwiGLU al posto della GELU per aumentare la capacità del modello senza aumentare la dimensione degli embeding (https://arxiv.org/abs/2002.05202)
-    
+    - uso di RoPE al posto dei positional embeddings per ridurre l'uso di memoria e per aumentare l'efficacia dell'attenzione per le sequenze più lunghe (https://arxiv.org/abs/2104.09864)
 '''
 
 import os
